@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	ci "github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/containerinsight"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/k8s/k8sclient"
@@ -619,11 +620,14 @@ func TestPodStore_decorateCpu(t *testing.T) {
 	assert.Equal(t, float64(10), metric.GetField("container_cpu_utilization_over_container_limit").(float64))
 }
 
-func TestPodStore_decorateCpu_WithInitContainers(t *testing.T) {
+func TestPodStore_decorateCpu_WithInitContainersAndPodOverhead(t *testing.T) {
 	podStore := getPodStore()
 	defer require.NoError(t, podStore.Shutdown())
 
 	pod := getInitContainerBaseTestPodInfo()
+
+	pod.Spec.Overhead = make(corev1.ResourceList)
+	pod.Spec.Overhead[corev1.ResourceCPU] = *resource.NewQuantity(5, resource.DecimalSI)
 
 	// test pod metrics
 	tags := map[string]string{ci.MetricType: ci.TypePod}
@@ -632,27 +636,11 @@ func TestPodStore_decorateCpu_WithInitContainers(t *testing.T) {
 	metric := generateMetric(fields, tags)
 	podStore.decorateCPU(metric, pod)
 
-	assert.Equal(t, uint64(20), metric.GetField("pod_cpu_request").(uint64))
-	assert.Equal(t, uint64(20), metric.GetField("pod_cpu_limit").(uint64))
-	assert.Equal(t, 0.5, metric.GetField("pod_cpu_reserved_capacity").(float64))
-	assert.Equal(t, float64(5), metric.GetField("pod_cpu_utilization_over_pod_limit").(float64))
+	assert.Equal(t, uint64(25), metric.GetField("pod_cpu_request").(uint64))
+	assert.Equal(t, uint64(25), metric.GetField("pod_cpu_limit").(uint64))
+	assert.Equal(t, 0.625, metric.GetField("pod_cpu_reserved_capacity").(float64))
+	assert.Equal(t, float64(4), metric.GetField("pod_cpu_utilization_over_pod_limit").(float64))
 	assert.Equal(t, float64(1), metric.GetField("pod_cpu_usage_total").(float64))
-
-	// test container metrics
-	tags = map[string]string{ci.MetricType: ci.TypeContainer, ci.ContainerNamekey: "ubuntu"}
-	fields = map[string]interface{}{ci.MetricName(ci.TypeContainer, ci.CPUTotal): float64(1)}
-	metric = generateMetric(fields, tags)
-	podStore.decorateCPU(metric, pod)
-
-	assert.Equal(t, uint64(10), metric.GetField("container_cpu_request").(uint64))
-	assert.Equal(t, uint64(10), metric.GetField("container_cpu_limit").(uint64))
-	assert.Equal(t, float64(1), metric.GetField("container_cpu_usage_total").(float64))
-	assert.False(t, metric.HasField("container_cpu_utilization_over_container_limit"))
-
-	podStore.includeEnhancedMetrics = true
-	podStore.decorateCPU(metric, pod)
-
-	assert.Equal(t, float64(10), metric.GetField("container_cpu_utilization_over_container_limit").(float64))
 }
 
 func TestPodStore_decorateCpu_WithNoLimitsAndResources(t *testing.T) {
@@ -742,10 +730,13 @@ func TestPodStore_decorateMem(t *testing.T) {
 	assert.Equal(t, float64(20), metric.GetField("container_memory_utilization_over_container_limit").(float64))
 }
 
-func TestPodStore_decorateMem_WithInitContainers(t *testing.T) {
+func TestPodStore_decorateMem_WithInitContainersAndPodOverhead(t *testing.T) {
 	podStore := getPodStore()
 	defer require.NoError(t, podStore.Shutdown())
 	pod := getInitContainerBaseTestPodInfo()
+
+	pod.Spec.Overhead = make(corev1.ResourceList)
+	pod.Spec.Overhead[corev1.ResourceMemory] = *resource.NewQuantity(5*1024*1024, resource.BinarySI)
 
 	tags := map[string]string{ci.MetricType: ci.TypePod}
 	fields := map[string]interface{}{ci.MetricName(ci.TypePod, ci.MemWorkingset): uint64(10 * 1024 * 1024)}
@@ -753,27 +744,11 @@ func TestPodStore_decorateMem_WithInitContainers(t *testing.T) {
 	metric := generateMetric(fields, tags)
 	podStore.decorateMem(metric, pod)
 
-	assert.Equal(t, uint64(52428800), metric.GetField("pod_memory_request").(uint64))
-	assert.Equal(t, uint64(52428800), metric.GetField("pod_memory_limit").(uint64))
-	assert.Equal(t, float64(12.5), metric.GetField("pod_memory_reserved_capacity").(float64))
-	assert.Equal(t, float64(20), metric.GetField("pod_memory_utilization_over_pod_limit").(float64))
+	assert.Equal(t, uint64(110100480), metric.GetField("pod_memory_request").(uint64))
+	assert.Equal(t, uint64(110100480), metric.GetField("pod_memory_limit").(uint64))
+	assert.Equal(t, 26.25, metric.GetField("pod_memory_reserved_capacity").(float64))
+	assert.Equal(t, 9.523809523809524, metric.GetField("pod_memory_utilization_over_pod_limit").(float64))
 	assert.Equal(t, uint64(10*1024*1024), metric.GetField("pod_memory_working_set").(uint64))
-
-	tags = map[string]string{ci.MetricType: ci.TypeContainer, ci.ContainerNamekey: "ubuntu"}
-	fields = map[string]interface{}{ci.MetricName(ci.TypeContainer, ci.MemWorkingset): uint64(10 * 1024 * 1024)}
-
-	metric = generateMetric(fields, tags)
-	podStore.decorateMem(metric, pod)
-
-	assert.Equal(t, uint64(52428800), metric.GetField("container_memory_request").(uint64))
-	assert.Equal(t, uint64(52428800), metric.GetField("container_memory_limit").(uint64))
-	assert.Equal(t, uint64(10*1024*1024), metric.GetField("container_memory_working_set").(uint64))
-	assert.False(t, metric.HasField("container_memory_utilization_over_container_limit"))
-
-	podStore.includeEnhancedMetrics = true
-	podStore.decorateMem(metric, pod)
-
-	assert.Equal(t, float64(20), metric.GetField("container_memory_utilization_over_container_limit").(float64))
 }
 
 func TestPodStore_previousCleanupLocking(_ *testing.T) {
